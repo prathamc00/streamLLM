@@ -15,7 +15,7 @@ StreamLLM is a lightweight, memory-aware LLM inference runtime that breaks the p
 
 ---
 
-## Quickstart & User Workflow (AirLLM-Style)
+## Quickstart & User Workflow 
 
 StreamLLM provides the exact user workflow popularized by AirLLM:
 
