@@ -68,3 +68,26 @@ StreamLLM_PRD.md
 
 # Benchmarks
 benchmarks/
+
+# Jupyter Notebooks & checkpoints
+.ipynb_checkpoints/
+*.ipynb
+*.ipyng
+
+# Local test & scratch scripts
+run_local.py
+run_*.py
+scratch/
+tmp/
+temp/
+
+# Environment variables, Secrets & PyPI Credentials
+.env
+.env.*
+.pypirc
+
+# HuggingFace & Torch cache
+.cache/
+huggingface/
+.pytest_cache/
+.coverage
