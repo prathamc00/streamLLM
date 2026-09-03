@@ -12,8 +12,8 @@ if root_dir not in sys.path:
 
 import torch
 import torch.nn as nn
-from src.pinned_host import PinnedHostWeightRegistry
-from src.engine import StreamLLMEngine
+from streamllm.pinned_host import PinnedHostWeightRegistry
+from streamllm.engine import StreamLLMEngine
 
 
 class SimpleBlock(nn.Module):

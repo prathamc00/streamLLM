@@ -24,8 +24,5 @@ dependencies = [
 [project.scripts]
 streamllm = "streamllm.cli:main"
 
-[tool.setuptools.package-dir]
-streamllm = "src"
-
 [tool.setuptools]
 packages = ["streamllm"]

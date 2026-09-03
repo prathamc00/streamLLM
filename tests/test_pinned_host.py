@@ -11,7 +11,7 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 import torch
-from src.pinned_host import PinnedHostWeightRegistry
+from streamllm.pinned_host import PinnedHostWeightRegistry
 
 
 class TestPinnedHost(unittest.TestCase):

@@ -11,7 +11,7 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 import torch
-from src.kv_cache import KVCacheConfig, KVCacheBudgetTracker, LayerKVCache
+from streamllm.kv_cache import KVCacheConfig, KVCacheBudgetTracker, LayerKVCache
 
 
 class TestKVCache(unittest.TestCase):

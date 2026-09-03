@@ -11,7 +11,7 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 import torch
-from src.hardware import HardwareProfiler
+from streamllm.hardware import HardwareProfiler
 
 
 class TestHardware(unittest.TestCase):

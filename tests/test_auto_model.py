@@ -11,17 +11,14 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 import torch
-try:
-    from streamllm import AutoModel
-except ImportError:
-    from src import AutoModel
+from streamllm import AutoModel
 
 
 class TestAutoModelWorkflow(unittest.TestCase):
     def test_automodel_inference_workflow(self):
         """Validates the StreamLLM AutoModel user workflow:
         
-            from src import AutoModel
+            from streamllm import AutoModel
             model = AutoModel.from_pretrained(...)
             input_tokens = model.tokenizer(...)
             generation_output = model.generate(input_tokens['input_ids'].cuda(), ...)

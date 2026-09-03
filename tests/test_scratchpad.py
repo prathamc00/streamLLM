@@ -12,7 +12,7 @@ if root_dir not in sys.path:
 
 import torch
 import torch.nn as nn
-from src.scratchpad import GPUScratchpadPool
+from streamllm.scratchpad import GPUScratchpadPool
 
 
 class TestScratchpad(unittest.TestCase):
