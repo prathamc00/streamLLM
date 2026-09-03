@@ -17,13 +17,13 @@ for p in [str(_root_dir), str(_current_dir)]:
         sys.path.insert(0, p)
 
 try:
-    from src.hardware import HardwareProfiler
-    from src.pinned_host import PinnedHostWeightRegistry
-    from src.engine import StreamLLMEngine
-except ModuleNotFoundError:
-    from hardware import HardwareProfiler
-    from pinned_host import PinnedHostWeightRegistry
-    from engine import StreamLLMEngine
+    from .hardware import HardwareProfiler
+    from .pinned_host import PinnedHostWeightRegistry
+    from .engine import StreamLLMEngine
+except (ImportError, ValueError):
+    from streamllm.hardware import HardwareProfiler
+    from streamllm.pinned_host import PinnedHostWeightRegistry
+    from streamllm.engine import StreamLLMEngine
 
 
 def cmd_hardware(args):

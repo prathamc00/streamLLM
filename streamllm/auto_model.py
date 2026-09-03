@@ -1,19 +1,13 @@
 """
 AutoModel: High-level interface for StreamLLM.
 
-Enables the clean user workflow:
-    from src import AutoModel
+Usage:
+    from streamllm import AutoModel
 
-    model = AutoModel.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-    input_tokens = model.tokenizer(['What is the capital of France?'], return_tensors="pt")
-    generation_output = model.generate(
-        input_tokens['input_ids'].cuda(),
-        max_new_tokens=20,
-        use_cache=True,
-        return_dict_in_generate=True,
-    )
-    output = model.tokenizer.decode(generation_output.sequences[0])
-    print(output)
+    model = AutoModel.from_pretrained("Qwen/Qwen2.5-14B-Instruct-AWQ")
+    tokens = model.tokenizer("Hello, how are you?", return_tensors="pt")
+    output = model.generate(tokens["input_ids"].cuda(), max_new_tokens=30)
+    print(model.tokenizer.decode(output.sequences[0]))
 """
 
 from dataclasses import dataclass
