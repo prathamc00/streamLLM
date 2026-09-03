@@ -73,9 +73,8 @@ print(output)
 
 ---
 
-## Tutorial: Running a 14B Model on a 4GB GPU
 
-StreamLLM enables running 14B models on consumer GPUs (e.g., RTX 3050 4GB) without out-of-memory errors by streaming layers across PCIe:
+StreamLLM enables running 14B models on consumer GPUs without out-of-memory errors by streaming layers across PCIe:
 
 ### 1. Choose Your Model
 We recommend **`Qwen/Qwen2.5-14B-Instruct-AWQ`** (4-bit quantized). At 4-bit precision, the model is ~8.5 GB on disk, and each layer is only ~220 MB in VRAM.
@@ -87,8 +86,7 @@ pip install huggingface_hub
 huggingface-cli download Qwen/Qwen2.5-14B-Instruct-AWQ --local-dir ./models/Qwen2.5-14B-AWQ
 ```
 
-### 3. Run Inference (`run_14b.py`)
-```python
+### 3. Run Inference 
 import time
 import torch
 from streamllm import AutoModel
