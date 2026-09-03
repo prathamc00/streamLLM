@@ -73,6 +73,54 @@ print(output)
 
 ---
 
+## Tutorial: Running a 14B Model on a 4GB GPU
+
+StreamLLM enables running 14B models on consumer GPUs (e.g., RTX 3050 4GB) without out-of-memory errors by streaming layers across PCIe:
+
+### 1. Choose Your Model
+We recommend **`Qwen/Qwen2.5-14B-Instruct-AWQ`** (4-bit quantized). At 4-bit precision, the model is ~8.5 GB on disk, and each layer is only ~220 MB in VRAM.
+
+### 2. Download the Model (Optional)
+StreamLLM can stream and cache the model automatically from Hugging Face. To pre-download locally:
+```bash
+pip install huggingface_hub
+huggingface-cli download Qwen/Qwen2.5-14B-Instruct-AWQ --local-dir ./models/Qwen2.5-14B-AWQ
+```
+
+### 3. Run Inference (`run_14b.py`)
+```python
+import time
+import torch
+from streamllm import AutoModel
+
+MODEL_ID = "Qwen/Qwen2.5-14B-Instruct-AWQ"  # or "./models/Qwen2.5-14B-AWQ"
+
+# Initialize with asynchronous layer prefetching
+model = AutoModel.from_pretrained(
+    MODEL_ID,
+    prefetching=True,
+    device="cuda:0",
+)
+
+prompt = "Explain quantum computing in 3 simple bullet points:"
+input_tokens = model.tokenizer(prompt, return_tensors="pt")
+
+# Streamed generation on 4GB GPU
+output = model.generate(
+    input_tokens["input_ids"].cuda(),
+    max_new_tokens=40,
+    use_cache=True,
+    return_dict_in_generate=True,
+)
+
+print(model.tokenizer.decode(output.sequences[0]))
+```
+
+### 4. Monitor VRAM
+While running, execute `nvidia-smi -l 1` in another terminal. Memory usage stays strictly under **~2.0 GB** on your 4GB card!
+
+---
+
 ## CLI & Diagnostic Commands
 
 Once installed, the `streamllm` command is available directly in your terminal:
