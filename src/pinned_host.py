@@ -19,14 +19,26 @@ class PinnedHostWeightRegistry:
     def register_layer(self, layer_id: int, weights: Dict[str, torch.Tensor], pin: bool = True) -> None:
         pinned_dict = {}
         for name, tensor in weights.items():
-            # Ensure CPU tensor is page-locked
             cpu_tensor = tensor.cpu()
-            pinned_dict[name] = cpu_tensor.pin_memory() if (pin and torch.cuda.is_available()) else cpu_tensor
+            if pin and torch.cuda.is_available():
+                try:
+                    pinned_dict[name] = cpu_tensor.pin_memory()
+                except RuntimeError:
+                    # Graceful fallback if system page-locked quota is reached
+                    pinned_dict[name] = cpu_tensor
+            else:
+                pinned_dict[name] = cpu_tensor
         self.layers[layer_id] = pinned_dict
 
     def register_non_layer_weight(self, name: str, tensor: torch.Tensor, pin: bool = True) -> None:
         cpu_tensor = tensor.cpu()
-        self.non_layer_weights[name] = cpu_tensor.pin_memory() if (pin and torch.cuda.is_available()) else cpu_tensor
+        if pin and torch.cuda.is_available():
+            try:
+                self.non_layer_weights[name] = cpu_tensor.pin_memory()
+            except RuntimeError:
+                self.non_layer_weights[name] = cpu_tensor
+        else:
+            self.non_layer_weights[name] = cpu_tensor
 
     def get_layer(self, layer_id: int) -> Dict[str, torch.Tensor]:
         if layer_id not in self.layers:

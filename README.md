@@ -19,16 +19,20 @@ StreamLLM is a lightweight, memory-aware LLM inference runtime that breaks the p
 
 ---
 
-<<<<<<< HEAD
 ## Installation
-=======
-## Quickstart & User Workflow 
->>>>>>> b7ffab37c0655d40290e92219d06a4305a1ec7a0
 
 Install directly from [PyPI](https://pypi.org/project/streamllm/):
 
 ```bash
 pip install streamllm
+```
+
+Or install from source in development mode:
+
+```bash
+git clone https://github.com/prathamc00/llm-Forge.git
+cd llm-Forge
+pip install -e .
 ```
 
 
@@ -89,3 +93,25 @@ streamllm bench --layers 16 --hidden-dim 2048 --seq-len 128
 ```bash
 python -m unittest discover -s tests
 ```
+
+### 4. Run Benchmark Suite & Generate Chart
+```bash
+python benchmarks/benchmark_and_plot.py
+```
+
+---
+
+## Benchmark Performance
+
+![StreamLLM Benchmark Performance](assets/benchmark_results.png)
+
+### Measured Hardware: `NVIDIA GeForce RTX 3050 Laptop GPU` (VRAM: 4096 MB, PCIe: 8.65 GB/s)
+
+| Layers | Model Weight Size | Sequential Latency | Prefetch Latency | Speedup | GPU VRAM Scratchpad |
+|---|---|---|---|---|---|
+| **8 Layers** | 512.1 MB | 68.08 ms | **56.70 ms** | **1.20x** | **128.0 MB** |
+| **16 Layers** | 1024.1 MB | 136.51 ms | **126.11 ms** | **1.08x** | **128.0 MB** |
+| **24 Layers** | 1536.2 MB | 219.05 ms | **170.54 ms** | **1.28x** | **128.0 MB** |
+| **32 Layers** | 2048.2 MB | 278.85 ms | **265.03 ms** | **1.05x** | **128.0 MB** |
+
+> **Key Takeaway:** Even as total model weights grow to over 2 GB, StreamLLM's static scratchpad pool holds physical GPU memory strictly at **128.0 MB** while asynchronous prefetching delivers up to **1.28x faster inference**.
