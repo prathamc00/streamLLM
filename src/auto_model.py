@@ -1,7 +1,7 @@
 """
-AutoModel: AirLLM-compatible high-level interface for StreamLLM.
+AutoModel: High-level interface for StreamLLM.
 
-Enables the exact user workflow:
+Enables the clean user workflow:
     from src import AutoModel
 
     model = AutoModel.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
@@ -37,9 +37,14 @@ except ImportError:
     AutoConfig = None
     AutoTokenizer = None
 
-from src.pinned_host import PinnedHostWeightRegistry
-from src.engine import StreamLLMEngine
-from src.hardware import HardwareProfiler
+try:
+    from .pinned_host import PinnedHostWeightRegistry
+    from .engine import StreamLLMEngine
+    from .hardware import HardwareProfiler
+except (ImportError, ValueError):
+    from pinned_host import PinnedHostWeightRegistry
+    from engine import StreamLLMEngine
+    from hardware import HardwareProfiler
 
 
 @dataclass
@@ -49,7 +54,7 @@ class GenerationOutput:
 
 
 class StreamLLMModel(nn.Module):
-    """AirLLM-compatible model wrapper executing inference via intelligent layer streaming."""
+    """Memory-efficient model wrapper executing inference via intelligent layer streaming."""
 
     def __init__(
         self,
@@ -142,7 +147,7 @@ class StreamLLMModel(nn.Module):
         return_dict_in_generate: bool = True,
         temperature: float = 0.0,
     ) -> Union[GenerationOutput, torch.Tensor]:
-        """AirLLM-compatible autoregressive generation loop with layer streaming."""
+        """Autoregressive generation loop with layer streaming."""
         input_ids = input_ids.to(self.device)
         sequences = input_ids.clone()
 
@@ -203,7 +208,7 @@ class MockTokenizer:
 
 
 class AutoModel:
-    """AirLLM-style AutoModel factory class.
+    """StreamLLM AutoModel factory class.
     
     Example:
         model = AutoModel.from_pretrained("Qwen/Qwen2.5-7B-Instruct")

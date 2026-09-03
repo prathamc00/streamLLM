@@ -7,9 +7,14 @@ import time
 import torch
 import torch.nn as nn
 
-from src.scratchpad import GPUScratchpadPool
-from src.pinned_host import PinnedHostWeightRegistry
-from src.transfer import DualStreamTransferEngine
+try:
+    from .scratchpad import GPUScratchpadPool
+    from .pinned_host import PinnedHostWeightRegistry
+    from .transfer import DualStreamTransferEngine
+except (ImportError, ValueError):
+    from scratchpad import GPUScratchpadPool
+    from pinned_host import PinnedHostWeightRegistry
+    from transfer import DualStreamTransferEngine
 
 
 class StreamLLMEngine:

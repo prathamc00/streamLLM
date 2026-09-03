@@ -4,7 +4,10 @@ Dual CUDA Stream Transfer Engine with Lock-Free Hardware Event Synchronization.
 
 from typing import Dict
 import torch
-from src.scratchpad import LayerBufferSlot
+try:
+    from .scratchpad import LayerBufferSlot
+except (ImportError, ValueError):
+    from scratchpad import LayerBufferSlot
 
 
 class DualStreamTransferEngine:

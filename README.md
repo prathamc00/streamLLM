@@ -1,5 +1,9 @@
 # StreamLLM
 
+[![PyPI version](https://img.shields.io/pypi/v/streamllm.svg?color=blue)](https://pypi.org/project/streamllm/)
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
+
 > **Run bigger LLMs on smaller GPUs through intelligent, asynchronous layer streaming.**
 
 StreamLLM is a lightweight, memory-aware LLM inference runtime that breaks the physical VRAM barrier. By dynamically streaming transformer layers between host RAM and GPU VRAM using pre-allocated double-buffer scratchpads, StreamLLM allows running large quantized models on consumer GPUs (such as 4GB/6GB/8GB cards) with minimal transfer overhead.
@@ -15,12 +19,28 @@ StreamLLM is a lightweight, memory-aware LLM inference runtime that breaks the p
 
 ---
 
-## Quickstart & User Workflow (AirLLM-Style)
+## Installation
 
-StreamLLM provides the exact user workflow popularized by AirLLM:
+Install directly from [PyPI](https://pypi.org/project/streamllm/):
+
+```bash
+pip install streamllm
+```
+
+Or install from source in development mode:
+
+```bash
+git clone https://github.com/prathamc00/llm-Forge.git
+cd llm-Forge
+pip install -e .
+```
+
+---
+
+## Quickstart & Python Usage
 
 ```python
-from src import AutoModel
+from streamllm import AutoModel
 
 MAX_LENGTH = 128
 
@@ -55,16 +75,18 @@ print(output)
 
 ## CLI & Diagnostic Commands
 
+Once installed, the `streamllm` command is available directly in your terminal:
+
 ### 1. Check Hardware & PCIe Bandwidth
 Measure GPU VRAM, system RAM, and live Host-to-Device (H2D) PCIe throughput:
 ```bash
-python -m src.cli hardware
+streamllm hardware
 ```
 
 ### 2. Run Streaming vs. Prefetch Micro-Benchmark
 Benchmark sequential layer execution against double-buffered prefetching:
 ```bash
-python -m src.cli bench --layers 16 --hidden-dim 2048 --seq-len 128
+streamllm bench --layers 16 --hidden-dim 2048 --seq-len 128
 ```
 
 ### 3. Run Test Suite

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamllm"
+version = "0.1.0"
+description = "Run bigger LLMs on smaller GPUs through intelligent, asynchronous layer streaming."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "StreamLLM Authors"}
+]
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.28.0",
+    "safetensors>=0.4.0",
+    "rich>=13.0.0",
+    "psutil>=5.9.0",
+]
+
+[project.scripts]
+streamllm = "streamllm.cli:main"
+
+[tool.setuptools.package-dir]
+streamllm = "src"
+
+[tool.setuptools]
+packages = ["streamllm"]
