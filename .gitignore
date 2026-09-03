@@ -60,3 +60,8 @@ layer_shards/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# PRD and planning documents
+*PRD.md
+StreamForge_PRD.md
+StreamLLM_PRD.md
