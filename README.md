@@ -19,7 +19,11 @@ StreamLLM is a lightweight, memory-aware LLM inference runtime that breaks the p
 
 ---
 
+<<<<<<< HEAD
 ## Installation
+=======
+## Quickstart & User Workflow 
+>>>>>>> b7ffab37c0655d40290e92219d06a4305a1ec7a0
 
 Install directly from [PyPI](https://pypi.org/project/streamllm/):
 
@@ -27,15 +31,7 @@ Install directly from [PyPI](https://pypi.org/project/streamllm/):
 pip install streamllm
 ```
 
-Or install from source in development mode:
 
-```bash
-git clone https://github.com/prathamc00/llm-Forge.git
-cd llm-Forge
-pip install -e .
-```
-
----
 
 ## Quickstart & Python Usage
 
