@@ -31,7 +31,7 @@ class StreamLLMEngine:
         self.device = device
         self.num_layers = num_layers
         self.host_registry = host_registry
-        self.double_buffering = double_buffering and (device.type == "cuda")
+        self.double_buffering = double_buffering and (device.type == "cuda") and torch.cuda.is_available()
 
         # Extract layer parameter metadata (shapes and dtypes)
         state_dict_meta = {
@@ -76,9 +76,10 @@ class StreamLLMEngine:
         # -------------------------------------------------------------
         # Step 1: Prime pipeline by loading Layer 0 into Slot A
         layer0_weights = self.host_registry.get_layer(0)
+        stream = self.transfer_engine.compute_stream or (torch.cuda.current_stream() if torch.cuda.is_available() else None)
         self.scratchpad.active_slot.copy_from_host(
             layer0_weights,
-            stream=self.transfer_engine.compute_stream or torch.cuda.current_stream(),
+            stream=stream,
         )
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
@@ -129,7 +130,7 @@ class StreamLLMEngine:
 
         for layer_idx in range(self.num_layers):
             weights = self.host_registry.get_layer(layer_idx)
-            stream = self.transfer_engine.compute_stream or torch.cuda.current_stream()
+            stream = self.transfer_engine.compute_stream or (torch.cuda.current_stream() if torch.cuda.is_available() else None)
             slot.copy_from_host(weights, stream=stream)
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)

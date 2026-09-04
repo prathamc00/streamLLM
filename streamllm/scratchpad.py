@@ -2,7 +2,7 @@
 Zero-Allocation Static GPU Double-Buffer Scratchpad Pool.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
@@ -23,13 +23,17 @@ class LayerBufferSlot:
     def total_bytes(self) -> int:
         return sum(t.nelement() * t.element_size() for t in self.tensors.values())
 
-    def copy_from_host(self, host_weights: Dict[str, torch.Tensor], stream: torch.cuda.Stream) -> None:
+    def copy_from_host(self, host_weights: Dict[str, torch.Tensor], stream: Optional[torch.cuda.Stream] = None) -> None:
         """Asynchronously copies host pinned weights into pre-allocated GPU buffers."""
-        with torch.cuda.stream(stream):
+        if stream is not None and torch.cuda.is_available():
+            with torch.cuda.stream(stream):
+                for param_name, host_tensor in host_weights.items():
+                    if param_name in self.tensors:
+                        self.tensors[param_name].copy_(host_tensor, non_blocking=True)
+        else:
             for param_name, host_tensor in host_weights.items():
                 if param_name in self.tensors:
-                    # In-place copy: zero memory allocation churn!
-                    self.tensors[param_name].copy_(host_tensor, non_blocking=True)
+                    self.tensors[param_name].copy_(host_tensor)
 
 
 class GPUScratchpadPool:

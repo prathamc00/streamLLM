@@ -32,11 +32,29 @@ try:
     from .pinned_host import PinnedHostWeightRegistry
     from .engine import StreamLLMEngine
     from .auto_model import AutoModel, MODEL_PRESETS
+    from .models import (
+        AVAILABLE_MODELS,
+        install_model,
+        remove_model,
+        is_model_installed,
+        get_first_installed_model,
+        print_models_table,
+        resolve_model_name,
+    )
 except (ImportError, ValueError):
     from streamllm.hardware import HardwareProfiler
     from streamllm.pinned_host import PinnedHostWeightRegistry
     from streamllm.engine import StreamLLMEngine
     from streamllm.auto_model import AutoModel, MODEL_PRESETS
+    from streamllm.models import (
+        AVAILABLE_MODELS,
+        install_model,
+        remove_model,
+        is_model_installed,
+        get_first_installed_model,
+        print_models_table,
+        resolve_model_name,
+    )
 
 import os
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -67,6 +85,65 @@ def resolve_device(device_arg) -> torch.device:
     if isinstance(device_arg, int) or str(device_arg).isdigit():
         return torch.device(f"cuda:{device_arg}")
     return torch.device(str(device_arg))
+
+
+def resolve_chat_model(requested_model: Optional[str]) -> Optional[str]:
+    """Ensures a model is selected and installed before running chat or run."""
+    console = get_console()
+
+    if requested_model:
+        is_inst, size_str, _ = is_model_installed(requested_model)
+        if not is_inst:
+            resolved = resolve_model_name(requested_model)
+            if console:
+                console.print(f"[yellow]Model '{requested_model}' ({resolved}) is not installed locally.[/yellow]")
+                try:
+                    choice = Prompt.ask(
+                        "[bold cyan]Would you like to install it now?[/bold cyan]",
+                        choices=["y", "n"],
+                        default="y",
+                    )
+                    if choice.lower() == "y":
+                        install_model(requested_model)
+                        return requested_model
+                    else:
+                        console.print("[dim]Aborted. Run 'streamllm list' to view available models.[/dim]")
+                        return None
+                except (KeyboardInterrupt, EOFError):
+                    return None
+            else:
+                print(f"Model '{requested_model}' ({resolved}) is not installed locally.")
+                print(f"Run: streamllm install {requested_model}")
+                return None
+        return requested_model
+
+    # If no model was passed, look for the first installed model
+    first_inst = get_first_installed_model()
+    if first_inst:
+        if console:
+            console.print(f"[dim]No model specified. Using installed model: [bold cyan]{first_inst}[/bold cyan][/dim]")
+        else:
+            print(f"No model specified. Using installed model: {first_inst}")
+        return first_inst
+
+    # No models installed at all: guide the user
+    if console:
+        console.print("[yellow]No models are installed yet.[/yellow]\n")
+        print_models_table()
+        try:
+            choice = Prompt.ask(
+                "[bold cyan]Enter a preset model to install (or press Enter to exit)[/bold cyan]",
+                default="smollm-135m",
+            )
+            if choice:
+                install_model(choice)
+                return choice
+        except (KeyboardInterrupt, EOFError):
+            return None
+    else:
+        print("No models are installed yet.")
+        print("Run 'streamllm list' to see available models, or 'streamllm install smollm-135m'.")
+    return None
 
 
 def cmd_hardware(args):
@@ -136,7 +213,7 @@ def cmd_bench(args):
             name: torch.randn(param.shape, dtype=param.dtype)
             for name, param in template.named_parameters()
         }
-        registry.register_layer(i, layer_weights, pin=True)
+        registry.register_layer(i, layer_weights, pin=(device.type == "cuda"))
 
     input_tensor = torch.randn(1, seq_len, hidden_dim, device=device)
 
@@ -148,6 +225,7 @@ def cmd_bench(args):
         device=device,
         double_buffering=False,
     )
+
     # Warmup
     _ = engine_seq.forward_streamed(input_tensor)
     if device.type == "cuda":
@@ -191,6 +269,10 @@ def cmd_bench(args):
 
 def cmd_run(args):
     """Execute a single one-shot prompt with streaming output."""
+    model_name = resolve_chat_model(args.model)
+    if not model_name:
+        return
+
     prompt_text = args.prompt or args.prompt_opt
     if not prompt_text:
         if not sys.stdin.isatty():
@@ -210,10 +292,20 @@ def cmd_run(args):
     console = get_console() if not args.raw else None
 
     if not args.raw and console:
-        console.print(f"[dim]Loading '{args.model}' on {device}...[/dim]")
+        console.print(f"[dim]Loading '{model_name}' on {device}...[/dim]")
 
-    model = AutoModel.from_pretrained(args.model, device=device)
-    tokens = model.tokenizer(prompt_text, return_tensors="pt")
+    model = AutoModel.from_pretrained(model_name, device=device)
+
+    if hasattr(model.tokenizer, "apply_chat_template") and getattr(model.tokenizer, "chat_template", None):
+        try:
+            messages = [{"role": "user", "content": prompt_text}]
+            input_text = model.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        except Exception:
+            input_text = prompt_text
+    else:
+        input_text = prompt_text
+
+    tokens = model.tokenizer(input_text, return_tensors="pt")
     input_ids = tokens["input_ids"]
 
     if not args.raw and console:
@@ -253,6 +345,10 @@ def cmd_run(args):
 
 def cmd_chat(args):
     """Start an interactive multi-turn terminal chat REPL."""
+    model_name = resolve_chat_model(args.model)
+    if not model_name:
+        return
+
     device = resolve_device(args.device)
     console = get_console()
     device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
@@ -261,17 +357,17 @@ def cmd_chat(args):
     if console:
         banner_content = (
             f"[bold green]StreamLLM Asynchronous Layer Streaming[/bold green]\n\n"
-            f"[bold white]Model:[/bold white]       [cyan]{args.model}[/cyan]\n"
+            f"[bold white]Model:[/bold white]       [cyan]{model_name}[/cyan]\n"
             f"[bold white]Device:[/bold white]      [yellow]{device_name}[/yellow] ({device})\n"
             f"[bold white]Memory Mode:[/bold white] [magenta]Double-Buffered Static Scratchpad Pool[/magenta]\n\n"
             f"[dim]Commands:[/dim] [cyan]/help[/cyan], [cyan]/stats[/cyan], [cyan]/system[/cyan], [cyan]/clear[/cyan], [cyan]/exit[/cyan]"
         )
         console.print(Panel(banner_content, title="[bold cyan]StreamLLM Interactive Chat[/bold cyan]", border_style="cyan"))
-        console.print(f"[dim]Initializing model '{args.model}'...[/dim]")
+        console.print(f"[dim]Initializing model '{model_name}'...[/dim]")
     else:
-        print(f"=== StreamLLM Chat: {args.model} on {device_name} ===")
+        print(f"=== StreamLLM Chat: {model_name} on {device_name} ===")
 
-    model = AutoModel.from_pretrained(args.model, device=device)
+    model = AutoModel.from_pretrained(model_name, device=device)
     system_prompt = args.system
 
     if console:
@@ -355,7 +451,7 @@ def cmd_chat(args):
                         table.add_row("GPU Total VRAM", f"{total_b / (1024*1024):.1f} MB")
                         table.add_row("GPU Free VRAM", f"{free_b / (1024*1024):.1f} MB")
                         table.add_row("VRAM Allocated", f"{torch.cuda.memory_allocated(device) / (1024*1024):.1f} MB")
-                    table.add_row("Scratchpad Pool", "128.0 MB (Pre-allocated Static Slots A & B)")
+                    table.add_row("Scratchpad Pool", "Pre-allocated Static Slots A & B")
                     table.add_row("Overlapping Engine", "Dual CUDA Streams (Compute + PCIe Transfer)")
                     console.print(table)
                     console.print()
@@ -370,7 +466,21 @@ def cmd_chat(args):
                 continue
 
         # Autoregressive generation
-        prompt_with_context = f"System: {system_prompt}\nUser: {user_input}\nAssistant:"
+        if hasattr(model.tokenizer, "apply_chat_template") and getattr(model.tokenizer, "chat_template", None):
+            try:
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                for u, a in history:
+                    messages.append({"role": "user", "content": u})
+                    messages.append({"role": "assistant", "content": a})
+                messages.append({"role": "user", "content": user_input})
+                prompt_with_context = model.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            except Exception:
+                prompt_with_context = f"System: {system_prompt}\nUser: {user_input}\nAssistant:"
+        else:
+            prompt_with_context = f"System: {system_prompt}\nUser: {user_input}\nAssistant:"
+
         tokens = model.tokenizer(prompt_with_context, return_tensors="pt")
         input_ids = tokens["input_ids"]
 
@@ -403,6 +513,40 @@ def cmd_chat(args):
         history.append((user_input, response_text))
 
 
+def cmd_models(args):
+    """Subcommand dispatcher for model management."""
+    action = getattr(args, "action", "list")
+    if not action or action == "list":
+        print_models_table(installed_only=getattr(args, "installed", False))
+    elif action in ("install", "pull"):
+        model_target = getattr(args, "model_name", None)
+        if not model_target:
+            print("Error: Specify model to install. Example: streamllm install qwen-0.5b")
+            return
+        install_model(model_target, token=getattr(args, "token", None), force=getattr(args, "force", False))
+    elif action in ("remove", "rm", "delete"):
+        model_target = getattr(args, "model_name", None)
+        if not model_target:
+            print("Error: Specify model to remove. Example: streamllm models remove qwen-0.5b")
+            return
+        remove_model(model_target)
+    else:
+        print(f"Unknown action: '{action}'. Available: list, install, remove")
+
+
+def cmd_list(args):
+    """List available and installed models."""
+    print_models_table(installed_only=getattr(args, "installed", False))
+
+
+def cmd_install(args):
+    """Download and install a model."""
+    if not args.model:
+        print("Error: Specify model to install. Example: streamllm install qwen-0.5b")
+        return
+    install_model(args.model, token=getattr(args, "token", None), force=getattr(args, "force", False))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="StreamLLM CLI: Run large language models on low VRAM GPUs with layer streaming.",
@@ -412,7 +556,7 @@ def main():
 
     # chat
     p_chat = subparsers.add_parser("chat", help="Start an interactive chat session with live streaming")
-    p_chat.add_argument("model", nargs="?", default="demo", help="Model name or preset (demo, qwen-14b, llama3-8b, mistral-7b)")
+    p_chat.add_argument("model", nargs="?", default=None, help="Model preset (e.g. qwen-0.5b, smollm-135m, llama3-8b) or HuggingFace repo ID")
     p_chat.add_argument("--system", type=str, default="You are a helpful and concise AI assistant.", help="System prompt")
     p_chat.add_argument("--max-tokens", type=int, default=128, help="Maximum new tokens per turn")
     p_chat.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
@@ -421,7 +565,7 @@ def main():
 
     # run
     p_run = subparsers.add_parser("run", help="Run a one-shot prompt with streaming output")
-    p_run.add_argument("model", nargs="?", default="demo", help="Model name or preset (demo, qwen-14b, llama3-8b, mistral-7b)")
+    p_run.add_argument("model", nargs="?", default=None, help="Model preset (e.g. qwen-0.5b, smollm-135m, llama3-8b) or HuggingFace repo ID")
     p_run.add_argument("prompt", nargs="?", default=None, help="Prompt text to send to the model")
     p_run.add_argument("--prompt", "-p", dest="prompt_opt", default=None, help="Alternative prompt flag")
     p_run.add_argument("--max-tokens", type=int, default=64, help="Maximum new tokens to generate")
@@ -429,6 +573,50 @@ def main():
     p_run.add_argument("--device", type=str, default="auto", help="Execution device (auto, cuda:0, cpu)")
     p_run.add_argument("--raw", action="store_true", help="Print only raw tokens (useful for piping to scripts)")
     p_run.set_defaults(func=cmd_run)
+
+    # list (convenience alias)
+    p_list = subparsers.add_parser("list", help="List available and locally installed models")
+    p_list.add_argument("--installed", action="store_true", help="Show only locally installed models")
+    p_list.set_defaults(func=cmd_list)
+
+    # install / pull (convenience aliases)
+    p_install = subparsers.add_parser("install", help="Download and install a model into local cache")
+    p_install.add_argument("model", help="Preset name (e.g. qwen-0.5b, smollm-135m) or HuggingFace repo ID")
+    p_install.add_argument("--token", type=str, default=None, help="Hugging Face authorization token")
+    p_install.add_argument("--force", action="store_true", help="Force re-download even if already present")
+    p_install.set_defaults(func=cmd_install)
+
+    p_pull = subparsers.add_parser("pull", help="Alias for 'install'")
+    p_pull.add_argument("model", help="Preset name or HuggingFace repo ID")
+    p_pull.add_argument("--token", type=str, default=None, help="Hugging Face authorization token")
+    p_pull.add_argument("--force", action="store_true", help="Force re-download even if already present")
+    p_pull.set_defaults(func=cmd_install)
+
+    # models (full management group)
+    p_models = subparsers.add_parser("models", help="Model management: list, install, remove")
+    p_models_sub = p_models.add_subparsers(dest="action", help="Action to perform")
+
+    p_m_list = p_models_sub.add_parser("list", help="List available and locally installed models")
+    p_m_list.add_argument("--installed", action="store_true", help="Show only installed models")
+    p_m_list.set_defaults(func=cmd_models)
+
+    p_m_inst = p_models_sub.add_parser("install", help="Install a model")
+    p_m_inst.add_argument("model_name", help="Preset name or HuggingFace repo ID")
+    p_m_inst.add_argument("--token", type=str, default=None, help="Hugging Face token")
+    p_m_inst.add_argument("--force", action="store_true", help="Force re-download")
+    p_m_inst.set_defaults(func=cmd_models)
+
+    p_m_pull = p_models_sub.add_parser("pull", help="Pull a model (alias for install)")
+    p_m_pull.add_argument("model_name", help="Preset name or HuggingFace repo ID")
+    p_m_pull.add_argument("--token", type=str, default=None, help="Hugging Face token")
+    p_m_pull.add_argument("--force", action="store_true", help="Force re-download")
+    p_m_pull.set_defaults(func=cmd_models)
+
+    p_m_rm = p_models_sub.add_parser("remove", help="Remove a model from cache")
+    p_m_rm.add_argument("model_name", help="Preset name or HuggingFace repo ID to remove")
+    p_m_rm.set_defaults(func=cmd_models)
+
+    p_models.set_defaults(func=cmd_models)
 
     # hardware
     p_hw = subparsers.add_parser("hardware", help="Display GPU & PCIe diagnostic profile")
