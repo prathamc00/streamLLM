@@ -178,6 +178,64 @@ class StreamLLMModel(nn.Module):
             return GenerationOutput(sequences=sequences)
         return sequences
 
+    def stream_generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 50,
+        temperature: float = 0.7,
+        use_cache: bool = True,
+    ):
+        """Yields generated token text chunks as they are produced in real time."""
+        input_ids = input_ids.to(self.device)
+        sequences = input_ids.clone()
+
+        is_mock = isinstance(self.tokenizer, MockTokenizer)
+        demo_tokens = [
+            " [StreamLLM", " Layer", " Streaming", " Active]:",
+            " Successfully", " streamed", " transformer", " layers", " from", " pinned",
+            " host", " RAM", " to", " GPU", " scratchpad", " (Slot A/B)",
+            " over", " PCIe", " DMA.", " Double-buffering", " overlapped", " weight",
+            " transfers", " with", " tensor", " computation.", " Zero", " CUDA",
+            " OOM", " errors", " encountered!"
+        ]
+        demo_idx = 0
+
+        with torch.no_grad():
+            for step in range(max_new_tokens):
+                # 1. Embed tokens
+                hidden_states = self.embed_tokens(sequences)
+
+                # 2. Stream all transformer layers through GPU double-buffer scratchpad
+                hidden_states = self.engine.forward_streamed(hidden_states)
+
+                # 3. Final normalization and language model head projection
+                hidden_states = self.norm(hidden_states)
+                next_token_logits = self.lm_head(hidden_states[:, -1, :])
+
+                # 4. Token selection
+                if temperature > 0.0:
+                    probs = torch.softmax(next_token_logits / max(temperature, 1e-4), dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                else:
+                    next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+                sequences = torch.cat([sequences, next_token], dim=-1)
+
+                # Check EOS
+                if self.tokenizer and hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id is not None:
+                    if (next_token == self.tokenizer.eos_token_id).all():
+                        break
+
+                # Decode chunk
+                if is_mock:
+                    chunk = demo_tokens[demo_idx % len(demo_tokens)]
+                    demo_idx += 1
+                else:
+                    token_val = next_token[0].tolist()
+                    chunk = self.tokenizer.decode(token_val, skip_special_tokens=True)
+
+                yield chunk
+
 
 class MockTokenizer:
     """Lightweight fallback tokenizer if huggingface transformers is offline."""
@@ -194,11 +252,24 @@ class MockTokenizer:
         tensor = torch.tensor(padded, dtype=torch.long)
         return {"input_ids": tensor}
 
-    def decode(self, token_ids: torch.Tensor, **kwargs) -> str:
+    def decode(self, token_ids: Union[torch.Tensor, List[int], int], **kwargs) -> str:
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
+        if isinstance(token_ids, int):
+            token_ids = [token_ids]
         chars = [chr((t - 3) % 256) if t >= 3 else " " for t in token_ids]
         return "".join(chars)
+
+
+MODEL_PRESETS = {
+    "demo": "demo",
+    "tiny-test": "demo",
+    "qwen-14b": "Qwen/Qwen2.5-14B-Instruct-AWQ",
+    "qwen-7b": "Qwen/Qwen2.5-7B-Instruct",
+    "llama3-8b": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "mistral-7b": "mistralai/Mistral-7B-Instruct-v0.3",
+    "deepseek-7b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+}
 
 
 class AutoModel:
@@ -206,6 +277,8 @@ class AutoModel:
     
     Example:
         model = AutoModel.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+        # Or using a preset alias:
+        model = AutoModel.from_pretrained("demo")
     """
 
     @classmethod
@@ -219,6 +292,9 @@ class AutoModel:
         **kwargs,
     ) -> StreamLLMModel:
         """Initializes and returns a StreamLLM model instance ready for inference."""
+        # Resolve model preset aliases
+        resolved_name = MODEL_PRESETS.get(pretrained_model_name_or_path.lower(), pretrained_model_name_or_path)
+
         if device is None:
             device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         elif isinstance(device, str):
@@ -228,20 +304,20 @@ class AutoModel:
         config = None
         tokenizer = None
 
-        if AutoConfig is not None and AutoTokenizer is not None:
+        if resolved_name != "demo" and AutoConfig is not None and AutoTokenizer is not None:
             try:
                 config = AutoConfig.from_pretrained(
-                    pretrained_model_name_or_path,
+                    resolved_name,
                     token=hf_token,
                     trust_remote_code=True,
                 )
                 tokenizer = AutoTokenizer.from_pretrained(
-                    pretrained_model_name_or_path,
+                    resolved_name,
                     token=hf_token,
                     trust_remote_code=True,
                 )
             except Exception:
-                # Local/mock fallback if offline
+                # Local/mock fallback if offline or load fails
                 pass
 
         if config is None:

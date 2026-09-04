@@ -78,12 +78,32 @@ StreamLLM works out of the box with popular open model architectures:
 
 ---
 
-## CLI & Diagnostics
+## CLI & Interactive Commands
+
+StreamLLM includes an interactive terminal chat REPL and command-line runner with real-time token streaming:
 
 ```bash
-# Check GPU VRAM and live PCIe bandwidth
+# 1. Interactive Chat REPL (Ollama-style terminal experience)
+streamllm chat demo
+streamllm chat qwen-14b
+streamllm chat llama3-8b
+
+# Inside chat, you have built-in slash commands:
+# /stats   - Check live GPU VRAM & scratchpad allocation
+# /system  - Update the system instruction prompt
+# /clear   - Clear conversation history
+# /exit    - Quit chat
+
+# 2. One-shot command execution
+streamllm run demo "Explain layer streaming in 2 sentences"
+streamllm run qwen-14b "Summarize quantum computing" --max-tokens 100
+
+# 3. Pipeable raw output for scripts
+streamllm run demo "Generate JSON" --raw
+
+# 4. Check GPU VRAM and live PCIe bandwidth
 streamllm hardware
 
-# Run streaming benchmark
+# 5. Run streaming micro-benchmark
 streamllm bench --layers 16 --hidden-dim 2048 --seq-len 128
 ```
