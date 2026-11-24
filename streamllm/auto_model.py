@@ -189,8 +189,8 @@ class StreamLLMModel(nn.Module):
         from transformers.cache_utils import DynamicCache
 
         params = inspect.signature(self.layer_template.forward).parameters
-        key = "past_key_values" if "past_key_values" in params else "past_key_value"
-        if key not in params or not hasattr(self.layer_template, "self_attn"):
+        key = next((name for name in ("cache", "past_key_values", "past_key_value") if name in params), None)
+        if key is None or not hasattr(self.layer_template, "self_attn"):
             raise ValueError("Unsupported decoder cache API")
         return DynamicCache() if use_cache else None, key
 
