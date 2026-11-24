@@ -86,49 +86,21 @@ class StreamLLMModel(nn.Module):
         self.is_hf_transformer = False
 
         if hf_model is not None:
-            # 1. Embeddings
-            if hasattr(hf_model, "get_input_embeddings") and hf_model.get_input_embeddings() is not None:
-                self.embed_tokens = hf_model.get_input_embeddings().to(device)
-            elif hasattr(hf_model, "model") and hasattr(hf_model.model, "embed_tokens"):
-                self.embed_tokens = hf_model.model.embed_tokens.to(device)
-            else:
-                self.embed_tokens = nn.Embedding(self.vocab_size, self.hidden_size).to(device)
-
-            # 2. Final Normalization
-            if hasattr(hf_model, "model") and hasattr(hf_model.model, "norm"):
-                self.norm = hf_model.model.norm.to(device)
-            elif hasattr(hf_model, "transformer") and hasattr(hf_model.transformer, "ln_f"):
-                self.norm = hf_model.transformer.ln_f.to(device)
-            else:
-                self.norm = nn.LayerNorm(self.hidden_size).to(device)
-
-            # 3. LM Projection Head
-            if hasattr(hf_model, "lm_head") and hf_model.lm_head is not None:
-                self.lm_head = hf_model.lm_head.to(device)
-            else:
-                self.lm_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False).to(device)
-
-            # 4. Extract transformer layers
-            raw_layers = None
-            if hasattr(hf_model, "model") and hasattr(hf_model.model, "layers"):
-                raw_layers = hf_model.model.layers
-            elif hasattr(hf_model, "transformer") and hasattr(hf_model.transformer, "h"):
-                raw_layers = hf_model.transformer.h
-
-            if raw_layers and len(raw_layers) > 0:
-                self.num_layers = len(raw_layers)
-                self.is_hf_transformer = True
-                # Use Layer 0 as the GPU execution scratchpad module template
-                self.layer_template = raw_layers[0].to(device)
-
-                # Register all layer state dicts in pinned host RAM
-                self.host_registry = PinnedHostWeightRegistry()
-                for i, lyr in enumerate(raw_layers):
-                    layer_weights = {
-                        k: v.detach().clone().cpu()
-                        for k, v in lyr.state_dict().items()
-                    }
-                    self.host_registry.register_layer(i, layer_weights, pin=(device.type == "cuda"))
+            decoder = getattr(hf_model, "model", None)
+            if (decoder is None or not hasattr(decoder, "layers")
+                    or not hasattr(decoder, "norm") or hf_model.get_output_embeddings() is None):
+                raise ValueError(f"Unsupported decoder layout for {config.model_type}")
+            self.embed_tokens = hf_model.get_input_embeddings().to(device)
+            self.norm = decoder.norm.to(device)
+            self.lm_head = hf_model.get_output_embeddings().to(device)
+            self.num_layers = len(decoder.layers)
+            self.is_hf_transformer = True
+            self.layer_template = decoder.layers[0]
+            self.host_registry = PinnedHostWeightRegistry()
+            for index, layer in enumerate(decoder.layers):
+                self.host_registry.register_layer(index, layer.state_dict(), pin=device.type == "cuda")
+                decoder.layers[index] = nn.Identity()
+            self.layer_template.eval()
 
             # Rotary embeddings if available
             self.rotary_emb = None
@@ -136,10 +108,6 @@ class StreamLLMModel(nn.Module):
                 self.rotary_emb = hf_model.model.rotary_emb.to(device)
             elif hasattr(hf_model, "rotary_emb"):
                 self.rotary_emb = hf_model.rotary_emb.to(device)
-            else:
-                self.layer_template = self._create_layer_template(self.hidden_size)
-                self.host_registry = PinnedHostWeightRegistry()
-                self._init_mock_or_real_weights()
         else:
             # Fallback module template
             self.embed_tokens = nn.Embedding(self.vocab_size, self.hidden_size).to(device)
@@ -202,32 +170,59 @@ class StreamLLMModel(nn.Module):
 
     def _forward_layer(self, layer_module: nn.Module, hidden_states: torch.Tensor, layer_idx: int) -> torch.Tensor:
         """Executes a single transformer layer, handling HuggingFace return shapes and RoPE embeddings."""
-        if self.is_hf_transformer:
-            seq_len = hidden_states.shape[1]
-            pos_ids = torch.arange(seq_len, dtype=torch.long, device=hidden_states.device).unsqueeze(0)
-            pos_emb = None
-            if self.rotary_emb is not None:
-                try:
-                    pos_emb = self.rotary_emb(hidden_states, pos_ids)
-                except Exception:
-                    pass
-            try:
-                if pos_emb is not None:
-                    out = layer_module(hidden_states, position_ids=pos_ids, position_embeddings=pos_emb)
-                else:
-                    out = layer_module(hidden_states, position_ids=pos_ids)
-                if isinstance(out, (tuple, list)):
-                    return out[0]
-                return out
-            except Exception:
-                try:
-                    out = layer_module(hidden_states)
-                    if isinstance(out, (tuple, list)):
-                        return out[0]
-                    return out
-                except Exception:
-                    pass
         return layer_module(hidden_states)
+
+    def _prepare_request(self, ids, limit):
+        length = ids.size(1) + limit
+        if limit < 0 or length > getattr(self.config, "max_position_embeddings", float("inf")):
+            raise ValueError("Requested generation exceeds the model context or has a negative limit")
+        heads = getattr(self.config, "num_attention_heads", 1)
+        kv_heads = getattr(self.config, "num_key_value_heads", heads)
+        width = getattr(self.config, "head_dim", None) or self.hidden_size // heads
+        cache_bytes = 2 * self.num_layers * ids.size(0) * length * kv_heads * width * self.embed_tokens.weight.element_size()
+        self.engine.prepare_residency(cache_bytes)
+
+    def _generation_state(self, use_cache):
+        if not self.is_hf_transformer:
+            return None, None
+        import inspect
+        from transformers.cache_utils import DynamicCache
+
+        params = inspect.signature(self.layer_template.forward).parameters
+        key = "past_key_values" if "past_key_values" in params else "past_key_value"
+        if key not in params or not hasattr(self.layer_template, "self_attn"):
+            raise ValueError("Unsupported decoder cache API")
+        return DynamicCache() if use_cache else None, key
+
+    def _generation_step(self, tokens, offset, cache, cache_key):
+        hidden = self.embed_tokens(tokens)
+        if cache_key is None:
+            return self.engine.forward_streamed(hidden, self._forward_layer)
+
+        positions = torch.arange(offset, offset + tokens.shape[1], device=self.device)
+        ids = positions.unsqueeze(0)
+        kwargs = {"position_ids": ids, "use_cache": cache is not None, cache_key: cache}
+        if self.rotary_emb is not None:
+            kwargs["position_embeddings"] = self.rotary_emb(hidden, ids)
+        if tokens.shape[1] > 1:
+            mask = hidden.new_full((tokens.shape[1], tokens.shape[1]), float("-inf"))
+            kwargs["attention_mask"] = mask.triu_(1)[None, None]
+
+        def forward(layer, x, index):
+            layer.self_attn.layer_idx = index
+            layer_kwargs = kwargs
+            window = getattr(layer.self_attn, "sliding_window", None)
+            if window is None and self.config.model_type == "mistral":
+                window = getattr(self.config, "sliding_window", None)
+            if window and offset + tokens.shape[1] > window:
+                keys = torch.arange(offset + tokens.shape[1], device=self.device)
+                disallowed = (keys > ids.T) | (keys <= ids.T - window)
+                mask = hidden.new_zeros(disallowed.shape).masked_fill_(disallowed, float("-inf"))
+                layer_kwargs = dict(kwargs, attention_mask=mask[None, None])
+            result = layer(x, **layer_kwargs)
+            return result[0] if isinstance(result, (tuple, list)) else result
+
+        return self.engine.forward_streamed(hidden, forward)
 
     def generate(
         self,
@@ -240,21 +235,20 @@ class StreamLLMModel(nn.Module):
         """Autoregressive generation loop with layer streaming."""
         input_ids = input_ids.to(self.device)
         sequences = input_ids.clone()
+        self._prepare_request(input_ids, max_new_tokens)
+        cache, cache_key = self._generation_state(use_cache)
+        offset = 0
 
         with torch.no_grad():
             for _ in range(max_new_tokens):
-                # 1. Embed tokens
-                hidden_states = self.embed_tokens(sequences)
-
-                # 2. Stream all transformer layers through GPU double-buffer scratchpad
-                hidden_states = self.engine.forward_streamed(
-                    hidden_states,
-                    layer_forward_fn=self._forward_layer,
-                )
+                tokens = sequences[:, offset:]
+                hidden_states = self._generation_step(tokens, offset, cache, cache_key)
+                if cache is not None:
+                    offset = sequences.shape[1]
 
                 # 3. Final normalization and language model head projection
-                hidden_states = self.norm(hidden_states)
-                next_token_logits = self.lm_head(hidden_states[:, -1, :])
+                last_hidden = self.norm(hidden_states[:, -1, :])
+                next_token_logits = self.lm_head(last_hidden)
 
                 # 4. Token selection
                 if temperature > 0.0:
@@ -284,22 +278,20 @@ class StreamLLMModel(nn.Module):
     ):
         """Yields generated token text chunks as they are produced in real time."""
         input_ids = input_ids.to(self.device)
-        sequences = input_ids.clone()
+        tokens = input_ids
+        self._prepare_request(input_ids, max_new_tokens)
+        cache, cache_key = self._generation_state(use_cache)
+        offset = 0
 
         with torch.no_grad():
             for step in range(max_new_tokens):
-                # 1. Embed tokens
-                hidden_states = self.embed_tokens(sequences)
-
-                # 2. Stream all transformer layers through GPU double-buffer scratchpad
-                hidden_states = self.engine.forward_streamed(
-                    hidden_states,
-                    layer_forward_fn=self._forward_layer,
-                )
+                hidden_states = self._generation_step(tokens, offset, cache, cache_key)
+                if cache is not None:
+                    offset += tokens.shape[1]
 
                 # 3. Final normalization and language model head projection
-                hidden_states = self.norm(hidden_states)
-                next_token_logits = self.lm_head(hidden_states[:, -1, :])
+                last_hidden = self.norm(hidden_states[:, -1, :])
+                next_token_logits = self.lm_head(last_hidden)
 
                 # 4. Token selection
                 if temperature > 0.0:
@@ -308,17 +300,19 @@ class StreamLLMModel(nn.Module):
                 else:
                     next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
-                sequences = torch.cat([sequences, next_token], dim=-1)
+                tokens = next_token if cache is not None else torch.cat([tokens, next_token], dim=-1)
 
                 # Decode real token chunk
-                token_val = next_token[0].tolist()
+                token_ids = next_token.flatten().tolist()
+                token_val = token_ids[:1]
                 chunk = self.tokenizer.decode(token_val, skip_special_tokens=True)
                 yield chunk
 
                 # Check EOS
                 if self.tokenizer and hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id is not None:
-                    if (next_token == self.tokenizer.eos_token_id).all():
-                        break
+                    if all(token == self.tokenizer.eos_token_id for token in token_ids):
+                        return "eos"
+        return "length"
 
 
 class MockTokenizer:
@@ -376,61 +370,20 @@ class AutoModel:
         is_inst, size_str, snapshot_path = is_model_installed(resolved_name)
         load_target = snapshot_path if snapshot_path else resolved_name
 
-        # Load Config & Tokenizer
-        config = None
-        tokenizer = None
-        hf_model = None
-
-        if AutoConfig is not None and AutoTokenizer is not None:
-            try:
-                config = AutoConfig.from_pretrained(
-                    load_target,
-                    token=hf_token,
-                    trust_remote_code=True,
-                )
-                tokenizer = AutoTokenizer.from_pretrained(
-                    load_target,
-                    token=hf_token,
-                    trust_remote_code=True,
-                )
-            except Exception as e:
-                if not is_inst:
-                    raise RuntimeError(
-                        f"Model '{pretrained_model_name_or_path}' is not installed locally and could not be reached online: {e}\n"
-                        f"Run 'streamllm install {pretrained_model_name_or_path}' to download it."
-                    )
-                pass
-
-        # Try loading real model weights into host memory for layer streaming
-        if AutoModelForCausalLM is not None and config is not None:
-            try:
-                hf_dtype = torch.float16 if (device.type == "cuda") else torch.float32
-                hf_model = AutoModelForCausalLM.from_pretrained(
-                    load_target,
-                    config=config,
-                    torch_dtype=hf_dtype,
-                    low_cpu_mem_usage=True,
-                    token=hf_token,
-                    trust_remote_code=True,
-                )
-            except Exception as e:
-                # If weights are missing locally
-                if not is_inst:
-                    raise RuntimeError(
-                        f"Model weights for '{pretrained_model_name_or_path}' are not downloaded.\n"
-                        f"Please run 'streamllm install {pretrained_model_name_or_path}' to install it."
-                    )
-                pass
-
-        if config is None:
-            class FallbackConfig:
-                hidden_size = 1024
-                num_hidden_layers = 8
-                vocab_size = 32000
-            config = FallbackConfig()
-
-        if tokenizer is None:
-            tokenizer = MockTokenizer()
+        if AutoModelForCausalLM is None:
+            raise ImportError("Install Transformers to load a checkpoint")
+        config = AutoConfig.from_pretrained(load_target, token=hf_token)
+        tokenizer = AutoTokenizer.from_pretrained(load_target, token=hf_token)
+        hf_model, loading = AutoModelForCausalLM.from_pretrained(
+            load_target, config=config, token=hf_token,
+            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            low_cpu_mem_usage=True, output_loading_info=True,
+        )
+        if loading.get("missing_keys") or loading.get("mismatched_keys"):
+            raise ValueError(f"Incomplete checkpoint: {loading}")
+        if getattr(hf_model, "is_quantized", False):
+            raise ValueError("Streaming packed quantized weights is unsupported")
+        hf_model.eval()
 
         model = StreamLLMModel(
             config=config,

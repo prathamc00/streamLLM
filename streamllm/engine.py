@@ -28,6 +28,7 @@ class StreamLLMEngine:
         device: torch.device,
         double_buffering: bool = True,
     ):
+        self.resident_layers = []
         self.device = device
         self.num_layers = num_layers
         self.host_registry = host_registry
@@ -62,6 +63,24 @@ class StreamLLMEngine:
             if name in slot_tensors:
                 param.data = slot_tensors[name]
 
+    def prepare_residency(self, cache_bytes):
+        if not self.double_buffering:
+            return
+        self._bind_slot_to_module(self.scratchpad.active_slot.tensors)
+        free, total = torch.cuda.mem_get_info(self.device)
+        layer_bytes = self.scratchpad.active_slot.total_bytes()
+        available = free + len(self.resident_layers) * layer_bytes
+        reserve = cache_bytes + max(total // 4, 512 * 1024**2)
+        target = min(self.num_layers, max(0, available - reserve) // layer_bytes)
+        del self.resident_layers[target:]
+        while len(self.resident_layers) < target:
+            host = self.host_registry.get_layer(len(self.resident_layers))
+            try:
+                weights = {name: host[name].to(self.device) for name in self.scratchpad.active_slot.tensors}
+            except torch.cuda.OutOfMemoryError:
+                break
+            self.resident_layers.append(weights)
+
     def forward_streamed(
         self,
         hidden_states: torch.Tensor,
@@ -74,19 +93,19 @@ class StreamLLMEngine:
         # -------------------------------------------------------------
         # Double-Buffered Pipelined Forward Pass
         # -------------------------------------------------------------
-        # Step 1: Prime pipeline by loading Layer 0 into Slot A
-        layer0_weights = self.host_registry.get_layer(0)
-        stream = self.transfer_engine.compute_stream or (torch.cuda.current_stream() if torch.cuda.is_available() else None)
-        self.scratchpad.active_slot.copy_from_host(
-            layer0_weights,
-            stream=stream,
-        )
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-
+        stream = self.transfer_engine.compute_stream
+        stream.wait_stream(torch.cuda.current_stream(self.device))
         x = hidden_states
+        with torch.cuda.stream(stream):
+            for index, weights in enumerate(self.resident_layers):
+                self._bind_slot_to_module(weights)
+                x = layer_forward_fn(self.layer_module, x, index) if layer_forward_fn else self.layer_module(x)
 
-        for layer_idx in range(self.num_layers):
+        start = len(self.resident_layers)
+        if start < self.num_layers:
+            self.scratchpad.active_slot.copy_from_host(self.host_registry.get_layer(start), stream=stream)
+
+        for layer_idx in range(start, self.num_layers):
             # Asynchronously prefetch Layer (idx + 1) into prefetch_slot
             if layer_idx + 1 < self.num_layers:
                 next_weights = self.host_registry.get_layer(layer_idx + 1)
@@ -130,10 +149,8 @@ class StreamLLMEngine:
 
         for layer_idx in range(self.num_layers):
             weights = self.host_registry.get_layer(layer_idx)
-            stream = self.transfer_engine.compute_stream or (torch.cuda.current_stream() if torch.cuda.is_available() else None)
+            stream = torch.cuda.current_stream(self.device) if self.device.type == "cuda" else None
             slot.copy_from_host(weights, stream=stream)
-            if self.device.type == "cuda":
-                torch.cuda.synchronize(self.device)
 
             self._bind_slot_to_module(slot.tensors)
             if layer_forward_fn:
@@ -141,6 +158,4 @@ class StreamLLMEngine:
             else:
                 x = self.layer_module(x)
 
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
         return x

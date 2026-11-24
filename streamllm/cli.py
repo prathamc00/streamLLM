@@ -178,6 +178,44 @@ def cmd_hardware(args):
         print("==================================================")
 
 
+def cmd_decode_bench(args):
+    from statistics import median
+    device = resolve_device(args.device)
+    model = AutoModel.from_pretrained(args.model, device=device)
+    ids = encode_messages(model.tokenizer, [{"role": "user", "content": args.prompt}])
+    speeds = []
+    for run in range(args.runs + 1):
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        start = time.perf_counter()
+        first = last = start
+        count = 0
+        for count, _ in enumerate(model.stream_generate(ids, max_new_tokens=args.max_tokens, temperature=0), 1):
+            last = time.perf_counter()
+            if count == 1:
+                first = last
+        if run:
+            elapsed = time.perf_counter() - start
+            speed = (count - 1) / (last - first) if count > 1 else 0
+            if count > 1:
+                speeds.append(speed)
+            print(f"Run {run}: {count} tokens, first {first-start:.3f}s, total {elapsed:.3f}s, decode {speed:.2f} tok/s")
+            if device.type == "cuda":
+                print(f"Peak allocated/reserved MiB: {torch.cuda.max_memory_allocated(device)/2**20:.1f}/"
+                      f"{torch.cuda.max_memory_reserved(device)/2**20:.1f}; "
+                      f"resident layers: {len(model.engine.resident_layers)}/{model.num_layers}")
+                streamed = model.num_layers - len(model.engine.resident_layers)
+                per_token = streamed * model.engine.scratchpad.active_slot.total_bytes()
+                pinned = sum(t.numel() * t.element_size() for layer in model.host_registry.layers.values()
+                             for t in layer.values() if t.is_pinned())
+                print(f"Layer weight transfers per decode token: {per_token / 2**20:.1f} MiB; "
+                      f"pinned host weights: {pinned / 2**20:.1f} MiB")
+    if speeds:
+        print(f"Median decode speed: {median(speeds):.2f} tok/s")
+    else:
+        print("Response ended before a decode interval could be measured.")
+
+
 def cmd_bench(args):
     print("==================================================")
     print(" StreamLLM Micro-Benchmark: Streaming vs Overlap")
@@ -267,6 +305,50 @@ def cmd_bench(args):
     print("--------------------------------------------------")
 
 
+def encode_messages(tokenizer, messages):
+    if getattr(tokenizer, "chat_template", None):
+        encoded = tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, return_tensors="pt"
+        )
+        return encoded if isinstance(encoded, torch.Tensor) else encoded["input_ids"]
+    if len(messages) == 1:
+        prompt = messages[0]["content"]
+    else:
+        prompt = "\n".join(f"{msg['role'].title()}: {msg['content']}" for msg in messages) + "\nAssistant:"
+    return tokenizer(prompt, return_tensors="pt")["input_ids"]
+
+
+def measured_chunks(model, input_ids, args):
+    device = model.device
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    start = time.perf_counter()
+    chunks = model.stream_generate(input_ids, max_new_tokens=args.max_tokens, temperature=args.temperature)
+    first = None
+    count = 0
+    last = None
+    while True:
+        try:
+            chunk = next(chunks)
+        except StopIteration as stop:
+            reason = stop.value
+            break
+        last = time.perf_counter() - start
+        count += 1
+        if first is None:
+            first = last
+        yield chunk
+    if reason == "length":
+        print(f"\nReached --max-tokens {args.max_tokens}. Increase the limit for a longer answer.", file=sys.stderr)
+    if first is not None and not getattr(args, "raw", False):
+        stats = f"Time to first token {first:.2f}s"
+        if count > 1 and last > first:
+            stats += f" | Output speed {(count - 1) / (last - first):.2f} tok/s"
+        if device.type == "cuda":
+            stats += f" | Peak allocated VRAM {torch.cuda.max_memory_allocated(device) / 2**20:.1f} MiB"
+        print(f"\n{stats}", file=sys.stderr)
+
+
 def cmd_run(args):
     """Execute a single one-shot prompt with streaming output."""
     model_name = resolve_chat_model(args.model)
@@ -296,17 +378,7 @@ def cmd_run(args):
 
     model = AutoModel.from_pretrained(model_name, device=device)
 
-    if hasattr(model.tokenizer, "apply_chat_template") and getattr(model.tokenizer, "chat_template", None):
-        try:
-            messages = [{"role": "user", "content": prompt_text}]
-            input_text = model.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        except Exception:
-            input_text = prompt_text
-    else:
-        input_text = prompt_text
-
-    tokens = model.tokenizer(input_text, return_tensors="pt")
-    input_ids = tokens["input_ids"]
+    input_ids = encode_messages(model.tokenizer, [{"role": "user", "content": prompt_text}])
 
     if not args.raw and console:
         console.print(f"\n[bold green]User:[/bold green] {prompt_text}")
@@ -318,7 +390,7 @@ def cmd_run(args):
     start_time = time.perf_counter()
     token_count = 0
 
-    for chunk in model.stream_generate(input_ids, max_new_tokens=args.max_tokens, temperature=args.temperature):
+    for chunk in measured_chunks(model, input_ids, args):
         token_count += 1
         if args.raw:
             sys.stdout.write(chunk)
@@ -465,24 +537,18 @@ def cmd_chat(args):
                     print(f"Unknown command: {cmd}")
                 continue
 
-        # Autoregressive generation
-        if hasattr(model.tokenizer, "apply_chat_template") and getattr(model.tokenizer, "chat_template", None):
-            try:
-                messages = []
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
-                for u, a in history:
-                    messages.append({"role": "user", "content": u})
-                    messages.append({"role": "assistant", "content": a})
-                messages.append({"role": "user", "content": user_input})
-                prompt_with_context = model.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            except Exception:
-                prompt_with_context = f"System: {system_prompt}\nUser: {user_input}\nAssistant:"
-        else:
-            prompt_with_context = f"System: {system_prompt}\nUser: {user_input}\nAssistant:"
-
-        tokens = model.tokenizer(prompt_with_context, return_tensors="pt")
-        input_ids = tokens["input_ids"]
+        messages = [{"role": "system", "content": system_prompt}] if system_prompt else []
+        for user_text, answer in history:
+            messages.extend([{"role": "user", "content": user_text}, {"role": "assistant", "content": answer}])
+        messages.append({"role": "user", "content": user_input})
+        try:
+            input_ids = encode_messages(model.tokenizer, messages)
+        except Exception as error:
+            print(f"Could not format conversation: {error}", file=sys.stderr)
+            continue
+        if input_ids.size(1) + args.max_tokens > getattr(model.config, "max_position_embeddings", float("inf")):
+            print("Conversation exceeds the context budget. Use /clear or reduce --max-tokens.", file=sys.stderr)
+            continue
 
         if console:
             console.print("\n[bold green]Assistant:[/bold green] ", end="")
@@ -493,7 +559,7 @@ def cmd_chat(args):
         token_count = 0
         response_text = ""
 
-        for chunk in model.stream_generate(input_ids, max_new_tokens=args.max_tokens, temperature=args.temperature):
+        for chunk in measured_chunks(model, input_ids, args):
             token_count += 1
             response_text += chunk
             if console:
@@ -558,7 +624,7 @@ def main():
     p_chat = subparsers.add_parser("chat", help="Start an interactive chat session with live streaming")
     p_chat.add_argument("model", nargs="?", default=None, help="Model preset (e.g. qwen-0.5b, smollm-135m, llama3-8b) or HuggingFace repo ID")
     p_chat.add_argument("--system", type=str, default="You are a helpful and concise AI assistant.", help="System prompt")
-    p_chat.add_argument("--max-tokens", type=int, default=128, help="Maximum new tokens per turn")
+    p_chat.add_argument("--max-tokens", type=int, default=1024, help="Maximum new tokens per turn")
     p_chat.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
     p_chat.add_argument("--device", type=str, default="auto", help="Execution device (auto, cuda:0, cpu)")
     p_chat.set_defaults(func=cmd_chat)
@@ -568,7 +634,7 @@ def main():
     p_run.add_argument("model", nargs="?", default=None, help="Model preset (e.g. qwen-0.5b, smollm-135m, llama3-8b) or HuggingFace repo ID")
     p_run.add_argument("prompt", nargs="?", default=None, help="Prompt text to send to the model")
     p_run.add_argument("--prompt", "-p", dest="prompt_opt", default=None, help="Alternative prompt flag")
-    p_run.add_argument("--max-tokens", type=int, default=64, help="Maximum new tokens to generate")
+    p_run.add_argument("--max-tokens", type=int, default=1024, help="Maximum new tokens to generate")
     p_run.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
     p_run.add_argument("--device", type=str, default="auto", help="Execution device (auto, cuda:0, cpu)")
     p_run.add_argument("--raw", action="store_true", help="Print only raw tokens (useful for piping to scripts)")
@@ -623,6 +689,14 @@ def main():
     p_hw.add_argument("--device", type=int, default=0, help="CUDA device index")
     p_hw.add_argument("--bench-mb", type=int, default=128, help="PCIe benchmark buffer size in MB")
     p_hw.set_defaults(func=cmd_hardware)
+
+    decode = subparsers.add_parser("decode-bench", help="Benchmark real-model greedy generation")
+    decode.add_argument("model")
+    decode.add_argument("--prompt", default="Explain how rainfall forms in detail.")
+    decode.add_argument("--runs", type=int, choices=range(1, 101), default=5)
+    decode.add_argument("--max-tokens", type=int, default=128)
+    decode.add_argument("--device", default="auto")
+    decode.set_defaults(func=cmd_decode_bench)
 
     # bench
     p_bench = subparsers.add_parser("bench", help="Run streaming vs sequential micro-benchmark")

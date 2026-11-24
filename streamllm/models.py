@@ -6,6 +6,7 @@ download/installation of open-source models, and memory profiling estimates.
 """
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import sys
@@ -182,6 +183,24 @@ class InstalledModelInfo:
     snapshot_path: Optional[str]
 
 
+def has_checkpoint(folder):
+    root = Path(folder)
+    if not (root / "config.json").is_file():
+        return False
+    for name in ("model.safetensors", "pytorch_model.bin"):
+        if (root / name).is_file():
+            return True
+        index = root / (name + ".index.json")
+        if index.is_file():
+            try:
+                shards = set(json.loads(index.read_text(encoding="utf-8"))["weight_map"].values())
+                if shards and all((root / shard).is_file() for shard in shards):
+                    return True
+            except (ValueError, KeyError, AttributeError, OSError, TypeError):
+                continue
+    return False
+
+
 def scan_installed_models() -> Dict[str, InstalledModelInfo]:
     """Scans the local HuggingFace cache to identify installed models and weights."""
     installed: Dict[str, InstalledModelInfo] = {}
@@ -202,15 +221,10 @@ def scan_installed_models() -> Dict[str, InstalledModelInfo]:
         has_weights = False
         snapshot_dir = None
 
-        for rev in repo.revisions:
-            if hasattr(rev, "snapshot_path"):
+        for rev in sorted(repo.revisions, key=lambda r: r.last_modified, reverse=True):
+            if has_checkpoint(rev.snapshot_path):
                 snapshot_dir = str(rev.snapshot_path)
-            for f in rev.files:
-                name_lower = f.file_name.lower()
-                if name_lower.endswith((".safetensors", ".bin", ".pt", ".pth", ".gguf", ".awq")):
-                    has_weights = True
-                    break
-            if has_weights:
+                has_weights = True
                 break
 
         installed[repo_id.lower()] = InstalledModelInfo(
@@ -235,7 +249,7 @@ def is_model_installed(name_or_preset: str) -> Tuple[bool, str, Optional[str]]:
     
     # Check if user passed an existing local directory path
     if os.path.isdir(resolved_repo):
-        return True, "Local Folder", resolved_repo
+        return has_checkpoint(resolved_repo), "Local Folder", resolved_repo
 
     installed_map = scan_installed_models()
     info = installed_map.get(resolved_repo.lower())

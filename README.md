@@ -133,7 +133,7 @@ During inference, StreamLLM keeps only the currently executing layer on the GPU 
 - **Static GPU Scratchpad Pool (`GPUScratchpadPool`):** Pre-allocates two static VRAM buffer slots (Slot A and Slot B). Eliminates `cudaMalloc` and `cudaFree` churn during generation.
 - **Dual CUDA Streams:** Dedicated `compute_stream` and `transfer_stream` with lock-free hardware event synchronization (`torch.cuda.Event`).
 - **Pinned Host Memory:** Uses page-locked RAM (`torch.Tensor.pin_memory()`) for true non-blocking PCIe transfers.
-- **KV-Cache Manager:** Deterministic memory budgeting that ensures context length growth never causes an Out-of-Memory (OOM) crash.
+- **KV-Cache Manager:** Generation reserves estimated KV storage for the requested context when choosing GPU-resident layers. Peak usage also depends on the prompt and available device memory.
 
 ---
 
@@ -151,3 +151,9 @@ During inference, StreamLLM keeps only the currently executing layer on the GPU 
 | **32 Layers** | 2048.2 MB | 278.85 ms | **265.03 ms** | **1.05x** | **128.0 MB** |
 
 > **Key Takeaway:** Even as total model weights scale past 2.0 GB, StreamLLM's static scratchpad pool holds physical GPU memory strictly at **128.0 MB** while asynchronous prefetching delivers up to **1.28x faster inference**.
+
+
+### Benchmark a real checkpoint
+
+After installing the checkpoint, run `streamllm decode-bench deepseek-1.5b --device cuda:0 --max-tokens 128`.
+The benchmark performs one warmup and five timed greedy runs. It reports time to first token, decode throughput after the first token, and CUDA memory peaks. Use the same prompt and generation limit for comparisons. Chat and one-shot generation default to 1,024 new tokens.
