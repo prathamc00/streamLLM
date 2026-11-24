@@ -2,8 +2,8 @@
 StreamLLM Layer Streaming Engine and Inference Controller.
 """
 
-from typing import Callable, Dict, List, Optional
-import time
+from copy import deepcopy
+from typing import Callable, Dict, Optional
 import torch
 import torch.nn as nn
 
@@ -51,22 +51,23 @@ class StreamLLMEngine:
         # Place the layer module template on the GPU
         self.layer_module = layer_module_template.to(device)
 
-        # Initialize transfer engine
+        # The template doubles as slot zero; release its original parameter storage.
+        for name, param in self.layer_module.named_parameters():
+            param.data = self.scratchpad.slots[0].tensors[name]
+        self.slot_modules = [self.layer_module]
+        for slot in self.scratchpad.slots[1:]:
+            self.slot_modules.append(self._module_for_weights(slot.tensors))
         self.transfer_engine = DualStreamTransferEngine(device=device)
 
-    def _bind_slot_to_module(self, slot_tensors: Dict[str, torch.Tensor]) -> None:
-        """Binds pre-allocated GPU scratchpad tensors directly to module parameters.
-        
-        Zero allocation: swaps the internal data pointer in-place without malloc.
-        """
-        for name, param in self.layer_module.named_parameters():
-            if name in slot_tensors:
-                param.data = slot_tensors[name]
+    def _module_for_weights(self, weights: Dict[str, torch.Tensor]) -> nn.Module:
+        # Substitute parameters during cloning so no duplicate weight storage is allocated.
+        memo = {id(param): nn.Parameter(weights[name], requires_grad=False)
+                for name, param in self.layer_module.named_parameters()}
+        return deepcopy(self.layer_module, memo)
 
     def prepare_residency(self, cache_bytes):
         if not self.double_buffering:
             return
-        self._bind_slot_to_module(self.scratchpad.active_slot.tensors)
         free, total = torch.cuda.mem_get_info(self.device)
         layer_bytes = self.scratchpad.active_slot.total_bytes()
         # The driver excludes the allocator's cached blocks from free memory.
@@ -82,9 +83,10 @@ class StreamLLMEngine:
             host = self.host_registry.get_layer(len(self.resident_layers))
             try:
                 weights = {name: host[name].to(self.device) for name in self.scratchpad.active_slot.tensors}
+                module = self._module_for_weights(weights)
             except torch.cuda.OutOfMemoryError:
                 break
-            self.resident_layers.append(weights)
+            self.resident_layers.append(module)
 
     def forward_streamed(
         self,
@@ -98,17 +100,26 @@ class StreamLLMEngine:
         # -------------------------------------------------------------
         # Double-Buffered Pipelined Forward Pass
         # -------------------------------------------------------------
+        start = len(self.resident_layers)
+        if start == self.num_layers:
+            x = hidden_states
+            for index, module in enumerate(self.resident_layers):
+                x = layer_forward_fn(module, x, index) if layer_forward_fn else module(x)
+            return x
+
         stream = self.transfer_engine.compute_stream
-        stream.wait_stream(torch.cuda.current_stream(self.device))
+        caller = torch.cuda.current_stream(self.device)
+        stream.wait_stream(caller)
+        self.transfer_engine.transfer_stream.wait_stream(caller)
+        # Fetch the first nonresident layer while the resident prefix runs.
+        self.transfer_engine.async_prefetch(self.scratchpad.active_slot, self.host_registry.get_layer(start))
+
         x = hidden_states
         with torch.cuda.stream(stream):
-            for index, weights in enumerate(self.resident_layers):
-                self._bind_slot_to_module(weights)
-                x = layer_forward_fn(self.layer_module, x, index) if layer_forward_fn else self.layer_module(x)
+            for index, module in enumerate(self.resident_layers):
+                x = layer_forward_fn(module, x, index) if layer_forward_fn else module(x)
 
-        start = len(self.resident_layers)
-        if start < self.num_layers:
-            self.scratchpad.active_slot.copy_from_host(self.host_registry.get_layer(start), stream=stream)
+        self.transfer_engine.sync_compute_with_transfer()
 
         for layer_idx in range(start, self.num_layers):
             # Asynchronously prefetch Layer (idx + 1) into prefetch_slot
@@ -119,21 +130,10 @@ class StreamLLMEngine:
                     host_weights=next_weights,
                 )
 
-            # Compute current layer on compute_stream
-            if self.device.type == "cuda":
-                with torch.cuda.stream(self.transfer_engine.compute_stream):
-                    self._bind_slot_to_module(self.scratchpad.active_slot.tensors)
-                    if layer_forward_fn:
-                        x = layer_forward_fn(self.layer_module, x, layer_idx)
-                    else:
-                        x = self.layer_module(x)
-                    self.transfer_engine.record_compute_finished()
-            else:
-                self._bind_slot_to_module(self.scratchpad.active_slot.tensors)
-                if layer_forward_fn:
-                    x = layer_forward_fn(self.layer_module, x, layer_idx)
-                else:
-                    x = self.layer_module(x)
+            with torch.cuda.stream(stream):
+                module = self.slot_modules[self.scratchpad.active_slot_idx]
+                x = layer_forward_fn(module, x, layer_idx) if layer_forward_fn else module(x)
+                self.transfer_engine.record_compute_finished()
 
             # Synchronize: Ensure next layer DMA is done before next iteration computes on it
             if layer_idx + 1 < self.num_layers:
@@ -157,7 +157,6 @@ class StreamLLMEngine:
             stream = torch.cuda.current_stream(self.device) if self.device.type == "cuda" else None
             slot.copy_from_host(weights, stream=stream)
 
-            self._bind_slot_to_module(slot.tensors)
             if layer_forward_fn:
                 x = layer_forward_fn(self.layer_module, x, layer_idx)
             else:
