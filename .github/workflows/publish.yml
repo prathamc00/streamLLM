@@ -3,10 +3,14 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  push:
+    branches: [main]
+    paths: [pyproject.toml]
   workflow_dispatch:
 
 jobs:
   pypi-publish:
+    if: github.event_name != 'push' || github.event.head_commit.message == 'Publish StreamLLM 0.2.1'
     name: Upload release to PyPI
     runs-on: ubuntu-latest
     permissions:
