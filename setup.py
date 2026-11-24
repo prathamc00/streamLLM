@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="streamllm",
-    version="0.1.2",
+    version="0.2.0",
     packages=["streamllm"],
     entry_points={
         "console_scripts": [
