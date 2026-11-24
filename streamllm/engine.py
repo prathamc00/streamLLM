@@ -69,7 +69,12 @@ class StreamLLMEngine:
         self._bind_slot_to_module(self.scratchpad.active_slot.tensors)
         free, total = torch.cuda.mem_get_info(self.device)
         layer_bytes = self.scratchpad.active_slot.total_bytes()
-        available = free + len(self.resident_layers) * layer_bytes
+        # The driver excludes the allocator's cached blocks from free memory.
+        # Credit those blocks when budgeting the next request's KV cache.
+        reserved = torch.cuda.memory_reserved(self.device)
+        allocated = torch.cuda.memory_allocated(self.device)
+        reusable = max(0, reserved - allocated)
+        available = free + reusable + len(self.resident_layers) * layer_bytes
         reserve = cache_bytes + max(total // 4, 512 * 1024**2)
         target = min(self.num_layers, max(0, available - reserve) // layer_bytes)
         del self.resident_layers[target:]
